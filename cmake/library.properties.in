@@ -1,0 +1,9 @@
+name=@PROJECT_NAME@
+version=@PROJECT_VERSION@
+author=Arkanil Paul <sonu2002paul@gmail.com>
+maintainer=Arkanil Paul <sonu2002paul@gmail.com>
+sentence=A lightweight C++ library for asynchronous programming using coroutine-like state machines.
+category=Other
+url=https://github.com/Zandacrus/@PROJECT_NAME@.git
+architectures=avr
+includes=async_tiny.hpp
