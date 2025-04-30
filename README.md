@@ -587,10 +587,14 @@ CO_DEF(void, LedBlinker, int32_t,
     bool runForever;    // Whether to run indefinitely
     int cycles = 0;     // Number of blink cycles completed
 ) {
-    const int maxCycles = 5;  // Maximum blink cycles before stopping
+    int maxCycles = 5;  // Maximum blink cycles before stopping
     CO_BEGIN(2)
     
-    // Extract parameters from the args integer
+    // Extract parameters from the args integer:
+    // bits 0-7: LED pin
+    // bits 8-15: on time / 10 (ms)
+    // bits 16-23: off time / 10 (ms)
+    // bit 24: run forever flag
     vars.ledPin = args & 0xFF;
     vars.onTime = ((args >> 8) & 0xFF) * 10;
     vars.offTime = ((args >> 16) & 0xFF) * 10;
@@ -614,7 +618,185 @@ CO_DEF(void, LedBlinker, int32_t,
     CO_END()
 }
 
-// ...more coroutines (Button monitor, Servo controller, etc.)...
+// Button Monitor coroutine - monitors a button press
+CO_DEF(bool, ButtonMonitor, const int, 
+    uint8_t buttonPin;
+) {
+	const uint32_t debounceDelay = 100; // Debounce time in ms
+    CO_BEGIN(2)
+    
+    vars.buttonPin = args;
+    pinMode(vars.buttonPin, INPUT);
+    
+    // Continue monitoring until a button press is detected
+    while (true) {
+        // Check if button is pressed
+        CO_UNTIL(1, digitalRead(vars.buttonPin) == HIGH);
+        // Button state is HIGH
+        
+        // Wait for debounce period and check if state is stable
+        CO_SLEEP(2, async_tiny::time::msec(debounceDelay))
+        
+        if (digitalRead(vars.buttonPin) == LOW) CO_RETURN(true)
+    }
+    
+    CO_END()
+}
+
+// Servo Controller coroutine - smoothly moves a servo between positions
+CO_DEF(void, ServoController, int, 
+    uint8_t startPos = 0;    // Start position (degrees)
+    uint8_t endPos = 180;    // End position (degrees)
+    uint8_t currentPos = 0;  // Current position
+) {
+    const int stepDelay = 50;  // Delay between steps (ms)
+    const int stepSize = 5;    // Size of each step (degrees)
+    CO_BEGIN(1)
+    
+    // Parse args: lower 8 bits = start pos, upper 8 bits = end pos
+    vars.startPos = args & 0xFF;
+    vars.endPos = (args >> 8) & 0xFF;
+    vars.currentPos = vars.startPos;
+    
+    // Attach the servo if not already attached
+    myServo.attach(SERVO_PIN);
+    myServo.write(vars.currentPos);
+    
+    // Move from start to end position
+    while (vars.currentPos != vars.endPos) {
+        if (vars.currentPos < vars.endPos) {
+            vars.currentPos = min(vars.currentPos + stepSize, vars.endPos);
+        } else {
+            vars.currentPos = max(vars.currentPos - stepSize, vars.endPos);
+        }
+        
+        myServo.write(vars.currentPos);
+        CO_SLEEP(1, async_tiny::time::msec(stepDelay))
+    }
+    
+    CO_END()
+}
+
+// Sequential Light Pattern coroutine
+CO_DEF(void, LightPattern, void, 
+    int patternStep = 0;
+) {
+	const int numSteps = 6;
+	const int ledPins[3] = {LED_PIN_1, LED_PIN_2, LED_PIN_3};
+    CO_BEGIN(1)
+    
+    // Set pin modes
+    for (int i = 0; i < 3; i++) pinMode(ledPins[i], OUTPUT);
+    
+    while (vars.patternStep < numSteps) {
+        // Clear all LEDs
+        for (int i = 0; i < 3; i++) {
+            digitalWrite(ledPins[i], LOW);
+        }
+        
+        switch (vars.patternStep) {
+            case 0: // First LED on
+                digitalWrite(ledPins[0], HIGH);
+                break;
+            case 1: // First two LEDs on
+                digitalWrite(ledPins[0], HIGH);
+                digitalWrite(ledPins[1], HIGH);
+                break;
+            case 2: // All LEDs on
+                for (int i = 0; i < 3; i++) {
+                    digitalWrite(ledPins[i], HIGH);
+                }
+                break;
+            case 3: // Last two LEDs on
+                digitalWrite(ledPins[1], HIGH);
+                digitalWrite(ledPins[2], HIGH);
+                break;
+            case 4: // Last LED on
+                digitalWrite(ledPins[2], HIGH);
+                break;
+            case 5: // All LEDs off
+                // Already cleared above
+                break;
+        }
+        
+        vars.patternStep++;
+        CO_SLEEP(1, async_tiny::time::msec(300))
+    }
+    
+    CO_END()
+}
+
+// Main Controller coroutine - orchestrates the other coroutines
+CO_DEF(void, MainController, void, AS_IS(
+    LedBlinker ledBlinker1, ledBlinker2;
+    ButtonMonitor buttonMonitor;
+    ServoController servoController;
+    LightPattern lightPattern;
+    
+    // Tasks
+    async_tiny::awaitables::tasks::Task_C<LedBlinker> blinkTask1, blinkTask2;
+    async_tiny::awaitables::tasks::Task_C<ServoController> servoTask;
+    async_tiny::awaitables::tasks::Task_C<LightPattern> patternTask;
+    
+    bool buttonPressed = false;
+    int i;
+)) {
+    CO_BEGIN(4)
+    
+    Serial.println(F("MainController coroutine started. Starting blinking 2 LEDs..."));
+    
+    // Start LedBlinker1 (slow blink on LED_PIN_1)
+    // args encoding: LED_PIN | onTime/10 << 8 | offTime/10 << 16 | runForever << 24
+    // LED_PIN_1 with 500ms on, 500ms off, run forever
+    async_tiny::EventLoop::schedule_task(vars.blinkTask1, vars.ledBlinker1, 
+                                        LED_PIN_1 | (int32_t(50) << 8) | (int32_t(50) << 16) | (int32_t(1) << 24));
+    
+    // Start LedBlinker2 (fast blink on LED_PIN_2)
+    // LED_PIN_2 with 200ms on, 200ms off, run forever
+    async_tiny::EventLoop::schedule_task(vars.blinkTask2, vars.ledBlinker2, 
+                                        LED_PIN_2 | (int32_t(20) << 8) | (int32_t(20) << 16) | (int32_t(1) << 24));
+    
+    Serial.println(F("Starting button monitor"));
+    // Wait for button press
+    CO_AWAIT(1, vars.buttonMonitor, vars.buttonPressed, BUTTON_PIN)
+    
+    if (vars.buttonPressed) {
+        Serial.println(F("Button pressed! Starting servo movement and light pattern..."));
+        
+        // Stop LED blinking
+        vars.blinkTask1.reset(true);
+        vars.blinkTask2.reset(true);
+        
+        // Turn off LEDs
+        digitalWrite(LED_PIN_1, LOW);
+        digitalWrite(LED_PIN_2, LOW);
+        
+        for (vars.i = 0; vars.i < 2; vars.i++) {
+            // schedule light pattern
+            async_tiny::EventLoop::schedule_task(vars.patternTask, vars.lightPattern);
+            
+            // schedule servo task
+            // arg encoding: startPos | endPos << 8
+            async_tiny::EventLoop::schedule_task(vars.servoTask, vars.servoController, 0 | (int32_t(180) << 8));
+            
+            // Wait for pattern to complete
+            CO_AWAIT(2, vars.patternTask)
+            // Await servo movement completion
+            CO_AWAIT(4, vars.servoTask)
+
+            // Small delay between pattern repetitions
+            CO_SLEEP(3, async_tiny::time::sec(2))
+        }
+        
+        Serial.println(F("Demo complete!"));
+    }
+    
+    CO_END()
+}
+
+// Create instances
+MainController mainController;
+async_tiny::awaitables::tasks::Task_C<MainController> mainTask;
 
 void setup() {
   // Initialize serial communication
